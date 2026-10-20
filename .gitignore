@@ -1,0 +1,6 @@
+work/
+results/
+*.tar
+*.tar.sha256
+__pycache__/
+results_mock/

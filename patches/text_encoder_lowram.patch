@@ -1,0 +1,24 @@
+diff --git a/cosmos_transfer2/_src/predict2/text_encoders/text_encoder.py b/cosmos_transfer2/_src/predict2/text_encoders/text_encoder.py
+index 2ea3da5..ea7f438 100644
+--- a/cosmos_transfer2/_src/predict2/text_encoders/text_encoder.py
++++ b/cosmos_transfer2/_src/predict2/text_encoders/text_encoder.py
+@@ -88,7 +88,18 @@ class TextEncoder:
+             is_fsdp = torch.distributed.get_world_size() > 1
+         else:
+             is_fsdp = False
+-        if os.path.isdir(ckpt_path):
++        if os.path.isdir(ckpt_path) and not is_fsdp:
++            # LOCAL PATCH (2026-10-20, 31 GB-RAM workstation): memory-map each safetensors shard straight to the model's device and load it
++            # incrementally, instead of reading every shard into CPU RAM as bytes (peak > 22 GB). Same keys, same _extra_state filtering.
++            from safetensors.torch import load_file as _st_load
++            for _fn in sorted(os.listdir(ckpt_path)):
++                if _fn.endswith(".safetensors"):
++                    _sd = {k: v for k, v in _st_load(os.path.join(ckpt_path, _fn), device=str(self.device)).items() if not k.endswith("._extra_state")}
++                    self.model.load_state_dict(_sd, strict=False)
++                    del _sd
++                    torch.cuda.empty_cache()
++            state_dict = {}
++        elif os.path.isdir(ckpt_path):
+             state_dict = load_state_dict_from_folder(ckpt_path)
+         else:
+             state_dict = load_state_dict(ckpt_path)
