@@ -64,14 +64,16 @@ To pack whatever is finished at any time, run `bash pack_results.sh`. Send the `
 
 | Job | What | Samples | Rough time |
 |---|---|---|---|
-| J1 | Reproducibility: the same 30 frames as a reference GPU, from the identical input file and from a lossless PNG | 60 | 10 min |
+| J1 | Reproducibility: 30 frames a reference GPU already made, from the identical input file and from a lossless PNG | 60 | 10 min |
+| J2 | Three label-preserving set-ups on 262 frames: guided generation (labeled boxes anchored for 25 or 15 of 35 steps), and edge + depth + segmentation | 786 | 2–4 h |
 | J4 | Video mode on two 35-frame drives, standard model and the distilled 4-step model | 4 clips | 20–40 min |
-| J2 | Two multi-control variants (edge + depth + segmentation; depth + segmentation) on 62 frames | 124 | 1–2 h |
-| J3 | The main job: six towns, 6,250 frames, edge control at 720p | 6,250 | most of the night |
-| J5 | Filler if time remains: the last 250 frames of eight towns again with another seed | 1,950 | whatever is left |
+| J3 | The main job: every frame of eight towns (8,350) with the bulk set-up, Town03 and Town05 first | 8,350 | rest of the night |
+| J5 | Filler if time remains: the last 250 frames of each town again with another seed | 1,950 | whatever is left |
 
+The main job will probably not finish in one night. That is expected: rerun `run_overnight.sh` on another night and it continues.
 Times are estimates; `results/logs/timing.csv` records the real ones.
 All settings are fixed in `tools/gen.py`: 720p, 35 steps, guidance 3, fixed seeds, fixed prompt.
+The bulk set-up is guided generation with 25 anchored steps (`BULK_SETUP=G25`); `check.sh` tests it and falls back to edge-only (`D`) if it fails.
 
 ## Good to know
 
@@ -83,7 +85,8 @@ All settings are fixed in `tools/gen.py`: 720p, 35 steps, guidance 3, fixed seed
   `export HF_HUB_OFFLINE=1` before `check.sh` and `run_overnight.sh`.
 - **Low-RAM machines.** On machines with less than 64 GB RAM, `setup.sh` applies a small patch, `patches/text_encoder_lowram.patch`,
   that streams the text-encoder weights to the GPU. It changes no weights.
-- **Only some jobs.** For example, `JOBS=J3 bash run_overnight.sh`, or `J3_TOWNS="Town10HD Town07" ...` for some towns.
+- **Only some jobs.** For example, `JOBS=J3 bash run_overnight.sh`, or `BULK_TOWNS="Town03 Town05" ...` for some towns.
+  Keep the same `BULK_SETUP` on every night of a multi-night run.
 - **Dry run.** After `setup.sh`, `bash run_overnight.sh --mock` exercises all the plumbing in a few minutes with a stand-in generator,
   no GPU needed. It writes only to `results_mock/` and never affects the real run.
 
@@ -96,7 +99,8 @@ tools/gen.py                                            job definitions, schedul
 tools/summarize.py                                      morning summary + contact sheet (results/summary.txt)
 tools/predownload.py                                    Hugging Face access check and model downloads
 tools/make_inputs_local.sh                              how data/ was made (provenance only)
-data/inputs/                                            input frames as letterboxed one-frame H.264 files (see data/README.md)
+data/inputs/                                            input frames (letterboxed one-frame H.264) and guided-generation masks
+tools/make_masks_local.py                               how the masks were made (provenance only)
 data/reference/                                         outputs of the reference GPU for the reproducibility job
 ```
 

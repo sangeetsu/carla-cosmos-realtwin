@@ -22,10 +22,8 @@ SEG_PROMPT = "car. truck. bus. person. bicycle. motorcycle. road. sidewalk. buil
 EDGE = {"edge": {"preset_edge_threshold": "medium"}}                         # set-up D (identical to the local pilot)
 M1 = {"edge": {"control_weight": 1.0, "preset_edge_threshold": "medium"}, "depth": {"control_weight": 1.0},
       "seg": {"control_weight": 1.0, "control_prompt": SEG_PROMPT}}
-M2 = {"depth": {"control_weight": 1.0}, "seg": {"control_weight": 1.0, "control_prompt": SEG_PROMPT}}
 IMG = {"num_video_frames_per_chunk": 1, "max_frames": 1}
 CROP = (0, 154, 1242, 529)                                                   # letterbox -> original 1242x375 frame
-J3_TOWNS = os.environ.get("J3_TOWNS", "Town10HD Town07 Town01 Town02 Town04 Town06").split()   # bulk-job order
 SMOKE = [("Town07", k) for k in range(820, 1021, 40)] + [("Town10HD", k) for k in range(820, 1021, 40)]
 
 def log(m):
@@ -44,37 +42,62 @@ def png_letterbox(jpg):
         c = Image.new("RGB", (1242, 684)); c.paste(im, (0, 154)); c.save(p)
     return p
 
+def guided(town, frame, steps):
+    """Edge control + guided generation: labeled boxes (data/inputs/masks) stay anchored to the CARLA frame for the first `steps` of 35."""
+    return dict(EDGE, guided_generation_mask=str(INP / "masks" / town / f"{frame}.npz"), guided_generation_step_threshold=steps)
+
+# set-up name -> (cell suffix, controls for a given town/frame). D = the local pilot's set-up (edge only).
+SETUPS = {"D": ("d50_realtwin", lambda t, f: EDGE),
+          "G25": ("d52_guided25", lambda t, f: guided(t, f, 25)),
+          "G15": ("d53_guided15", lambda t, f: guided(t, f, 15)),
+          "M1": ("d54_edge_depth_seg", lambda t, f: M1)}
+COMPARE = ["G25", "G15", "M1"]                                             # J2: label-preserving candidates
+BULK_TOWNS = os.environ.get("BULK_TOWNS", "Town03 Town05 Town10HD Town07 Town01 Town02 Town04 Town06").split()
+
+def setup_status():
+    """Which set-ups passed check.sh, and the bulk set-up after any fallback."""
+    info = json.load(open(LOGS / "check.json")) if (LOGS / "check.json").exists() else {}
+    ok = {k: info.get(k, {}).get("ok", True) for k in ("D", "M1", "G25")}
+    usable = {"D": ok["D"], "M1": ok["M1"], "G25": ok["G25"], "G15": ok["G25"]}
+    bulk = os.environ.get("BULK_SETUP", "G25")
+    if not usable.get(bulk, False): bulk = "D"
+    return usable, bulk
+
+def cell(setup, town, frame, root="realtwin", tag=""):
+    return RES / root / setup / f"{town}_{SETUPS[setup][0]}{tag}" / f"{frame}.jpg"
+
 def plan():
-    """All jobs, highest priority first."""
+    """All jobs, highest priority first. Outputs are keyed by (set-up, town, frame), so a frame shared by two jobs is generated once."""
+    usable, bulk = setup_status()
     J = {}
     J["J1"] = []                                                             # reproducibility vs the local A6000 outputs (30 frames)
     for mp4 in sorted((INP / "repro" / "Town03").glob("*.mp4")):
         f = mp4.stem
         J["J1"].append(item("J1", "shipped_mp4", "Town03", f, mp4, RES / "J1_repro" / "shipped_mp4" / "Town03" / f"{f}.jpg", EDGE))
         J["J1"].append(item("J1", "png_input", "Town03", f, png_letterbox(mp4.with_suffix(".jpg")), RES / "J1_repro" / "png_input" / "Town03" / f"{f}.jpg", EDGE))
+    J["J2"] = []                                                             # label-preserving comparison on frames the pilot already scored
+    frames = [(t, f"frame_{k:06d}") for t in ("Town03", "Town05") for k in range(800, 1050, 2)] + [(t, f"frame_{k:06d}") for t, k in SMOKE]
+    for v in COMPARE:
+        if not usable[v]: continue
+        for t, f in frames: J["J2"].append(item("J2", v, t, f, INP / "D" / t / f"{f}.mp4", cell(v, t, f), SETUPS[v][1](t, f)))
     J["J4"] = []                                                             # video mode on two 35-record drives (base and distilled edge)
     for mp4 in sorted((INP / "video").glob("*.mp4")):
         J["J4"].append(item("J4", "video_base", mp4.stem.split("_")[0], mp4.stem, mp4, RES / "J4_video" / "base" / f"{mp4.stem}.mp4", EDGE, "video", PROMPT_VIDEO))
         J["J4"].append(item("J4", "video_distilled", mp4.stem.split("_")[0], mp4.stem, mp4, RES / "J4_video" / "distilled" / f"{mp4.stem}.mp4",
                             dict(EDGE, num_steps=4), "video", PROMPT_VIDEO, ("--model", "edge/distilled")))
-    J["J2"] = []                                                             # multi-control comparison (on-the-fly depth + segmentation)
-    frames = [(t, p) for t in ("Town03", "Town05") for p in sorted((INP / "M" / t).glob("*.mp4"))]
-    frames += [(t, INP / "D" / t / f"frame_{k:06d}.mp4") for t, k in SMOKE]
-    for v, ctl in (("M1_edge_depth_seg", M1), ("M2_depth_seg", M2)):
-        for t, p in frames: J["J2"].append(item("J2", v, t, p.stem, p, RES / "J2_multicontrol" / v / t / f"{p.stem}.jpg", ctl))
-    J["J3"] = []                                                             # the bulk real twin, set-up D, six towns
-    for t in J3_TOWNS:
+    J["J3"] = []                                                             # bulk real twin with the chosen set-up, all frames, Town03/Town05 first
+    for t in BULK_TOWNS:
+        if bulk == "D" and t in ("Town03", "Town05"): continue              # already made by the local pilot
         for p in sorted((INP / "D" / t).glob("*.mp4")):
-            J["J3"].append(item("J3", "D_edge", t, p.stem, p, RES / "J3_realtwin" / f"{t}_d50_realtwin" / f"{p.stem}.jpg", EDGE))
-    J["J5"] = []                                                             # filler: held-out records of all 8 towns again, generation seed 11
-    for t in ["Town03", "Town05"] + J3_TOWNS:
-        src = INP / "heldout" / t if t in ("Town03", "Town05") else INP / "D" / t
-        for p in sorted(src.glob("*.mp4")):
+            J["J3"].append(item("J3", bulk, t, p.stem, p, cell(bulk, t, p.stem), SETUPS[bulk][1](t, p.stem)))
+    J["J5"] = []                                                             # filler: held-out records again with generation seed 11
+    for t in BULK_TOWNS:
+        for p in sorted((INP / "D" / t).glob("*.mp4")):
             if int(p.stem.split("_")[1]) >= 800:
-                J["J5"].append(item("J5", "D_edge_seed11", t, p.stem, p, RES / "J5_seed_replicate" / f"{t}_d50_realtwin_s11" / f"{p.stem}.jpg", EDGE, seed0=11))
+                J["J5"].append(item("J5", bulk + "_seed11", t, p.stem, p, cell(bulk, t, p.stem, "realtwin_seed11", "_s11"), SETUPS[bulk][1](t, p.stem), seed0=11))
     return J
 
-CHUNK = {"J1": 30, "J4": 2, "J2": 31, "J3": 150, "J5": 150}
+CHUNK = {"J1": 30, "J4": 2, "J2": 50, "J3": 150, "J5": 150}
 
 def spec(it, seed, name):
     s = {"name": name, "prompt": it["prompt"], "video_path": it["src"], "seed": it.get("seed0", 1) + seed - 1,   # retries: seed0, seed0+1, seed0+2
@@ -169,7 +192,8 @@ def check(mock):
     if not g and not mock: log("ERROR: no NVIDIA GPU visible (nvidia-smi)"); sys.exit(1)
     src = INP / "D" / "Town10HD" / "frame_000940.mp4"
     tests = [("D", item("CHECK", "D_edge", "Town10HD", "frame_000940", src, RES / "check" / "D_edge.jpg", EDGE)),
-             ("M1", item("CHECK", "M1_edge_depth_seg", "Town10HD", "frame_000940", src, RES / "check" / "M1_edge_depth_seg.jpg", M1))]
+             ("M1", item("CHECK", "M1_edge_depth_seg", "Town10HD", "frame_000940", src, RES / "check" / "M1_edge_depth_seg.jpg", M1)),
+             ("G25", item("CHECK", "G25_guided", "Town10HD", "frame_000940", src, RES / "check" / "G25_guided.jpg", guided("Town10HD", "frame_000940", 25)))]
     for k, it in tests:
         if Path(it["out"]).exists(): Path(it["out"]).unlink()
         p = Peak(); p.start(); rc, dt, n = run_chunk(f"check_{k}", [it], 1, g[0]["index"] if g else 0, mock, True); p.stop = True; p.join()
@@ -177,19 +201,21 @@ def check(mock):
         log(f"check {k}: {'OK' if n else 'FAILED'} in {dt:.0f} s (incl. model load); peak GPU memory {p.vram} MiB, peak used RAM {p.ram} MiB")
         if not n: log(f"  see {LOGS}/chunk_check_{k}.log")
     if not info["D"]["ok"]: json.dump(info, open(LOGS / "check.json", "w"), indent=1); log("CHECK FAILED (the main job cannot run)"); sys.exit(1)
-    per = max(info["D"]["peak_vram_mib"], info["M1"]["peak_vram_mib"] if info["M1"]["ok"] else 0)
+    per = max(info[k]["peak_vram_mib"] for k in ("D", "M1", "G25") if info[k]["ok"])
     total = min(x["total"] for x in g) if g else 81920
     slots_gpu = max(1, min(3, int(total * 0.92 // max(per, 1) if per else 1)))
     slots_ram = max(1, int(info["ram_available_gb"] // 32))
-    info["workers"] = min(slots_gpu * max(1, len(g)), slots_ram); info["run_J2"] = info["M1"]["ok"]
+    info["workers"] = min(slots_gpu * max(1, len(g)), slots_ram)
     json.dump(info, open(LOGS / "check.json", "w"), indent=1)
-    log(f"CHECK PASSED. Worker slots: {info['workers']} ({slots_gpu} per GPU by memory, {slots_ram} by RAM). Multi-control job J2: {'on' if info['run_J2'] else 'OFF'}")
+    usable, bulk = setup_status()
+    log(f"CHECK PASSED. Worker slots: {info['workers']} ({slots_gpu} per GPU by memory, {slots_ram} by RAM). "
+        f"Set-ups usable: {[k for k, v in usable.items() if v]}; bulk set-up: {bulk}")
 
 def run(only, workers, mock, offload, stagger):
     info = json.load(open(LOGS / "check.json")) if (LOGS / "check.json").exists() else {}
     workers = workers or info.get("workers", 1); g = gpus(); ngpu = max(1, len(g)); gpu_ids = [x["index"] for x in g] or [0]
-    J = plan(); order = [j for j in ("J1", "J4", "J2", "J3", "J5") if (not only or j in only)]
-    if "J2" in order and info.get("run_J2") is False: order.remove("J2"); log("J2 skipped (multi-control failed in check.sh)")
+    J = plan(); order = [j for j in ("J1", "J2", "J4", "J3", "J5") if (not only or j in only)]
+    usable, bulk = setup_status(); log(f"bulk set-up {bulk}; comparison set-ups {[v for v in COMPARE if usable[v]]}")
     n_h = harvest_all(); log(f"resume: harvested {n_h} finished outputs; jobs {order}; {workers} worker slots on {ngpu} GPU(s)")
     tcsv = LOGS / "timing.csv"; new = not tcsv.exists(); lock = threading.Lock()
     with open(tcsv, "a", newline="") as f:
@@ -197,9 +223,10 @@ def run(only, workers, mock, offload, stagger):
     runid = time.strftime("%m%d-%H%M%S")                                     # chunk folders are unique per invocation
     rounds = [1, 1, 2, 3]                                                    # seed per round: 1, retry 1 (crash), then 2, then 3
     for r, seed in enumerate(rounds):
-        Q = queue.Queue(); total = 0
+        Q = queue.Queue(); total = 0; queued = set()
         for j in order:
-            pend = [it for it in J[j] if not Path(it["out"]).exists()]
+            pend = [it for it in J[j] if not Path(it["out"]).exists() and it["out"] not in queued]
+            queued.update(it["out"] for it in pend)
             groups = {}
             for it in pend: groups.setdefault(it["variant"], []).append(it)
             for v, its in groups.items():

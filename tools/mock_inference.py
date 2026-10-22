@@ -8,6 +8,8 @@ ap = argparse.ArgumentParser(); ap.add_argument("-i", nargs="+"); ap.add_argumen
 ap.add_argument("--model", default=None); a = ap.parse_args()
 for p in a.i:
     s = json.load(open(p)); name = s["name"]; src = s["video_path"]
+    if s.get("guided_generation_mask"):                                    # same checks Cosmos makes on the mask file
+        import numpy as _np; _m = _np.load(s["guided_generation_mask"])["arr_0"]; assert _m.ndim == 3 and _m.shape[1:] == (684, 1242), _m.shape
     if os.environ.get("MOCK_BLOCK") and os.environ["MOCK_BLOCK"] in name and s["seed"] == 1: print("mock guardrail block", name); continue
     if src.endswith(".png"): frames = [cv2.imread(src)]
     else:

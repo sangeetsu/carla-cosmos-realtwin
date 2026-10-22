@@ -35,16 +35,17 @@ for v in ("shipped_mp4", "png_input"):
     if vals: rep[v] = dict(n=len(vals), psnr_vs_local_median=round(float(np.median([x[0] for x in vals])), 2), mean_abs_diff_median=round(float(np.median([x[1] for x in vals])), 2))
 if rep: S["repro_vs_local_A6000"] = rep; lines.append(f"reproducibility vs local A6000: {rep}")
 san = {}
-for town in gen.J3_TOWNS:
-    fs = sorted((RES / "J3_realtwin" / f"{town}_d50_realtwin").glob("*.jpg"))[::50]
+for d in sorted({str(Path(it["out"]).parent) for it in J["J3"]}):
+    fs = sorted(Path(d).glob("*.jpg"))[::50]
     if fs:
-        ims = [cv2.imread(str(f)) for f in fs]; san[town] = dict(n_sampled=len(ims), mean=round(float(np.mean([i.mean() for i in ims])), 1),
-                                                                   share_near_black=round(float(np.mean([(i.max(2) < 10).mean() for i in ims])), 3))
-if san: S["sanity_J3"] = san; lines.append(f"J3 sanity (every 50th frame): {san}")
+        ims = [cv2.imread(str(f)) for f in fs]; san[Path(d).name] = dict(n_sampled=len(ims), mean=round(float(np.mean([i.mean() for i in ims])), 1),
+                                                                         share_near_black=round(float(np.mean([(i.max(2) < 10).mean() for i in ims])), 3))
+if san: S["sanity_J3"] = san; lines.append(f"bulk sanity (every 50th frame): {san}")
 if (RES / "logs" / "check.json").exists(): S["check"] = json.load(open(RES / "logs" / "check.json"))
 json.dump(S, open(RES / "summary.json", "w"), indent=1); open(RES / "summary.txt", "w").write("\n".join(lines) + "\n"); print("\n".join(lines))
 rows = []                                                                    # contact sheet: CARLA input | generated, a few per job
-pick = [it for it in J["J1"][:2]] + [it for it in J["J2"] if it["frame"] in ("frame_000940",)][:4] + [it for t_ in gen.J3_TOWNS for it in [x for x in J["J3"] if x["town"] == t_][800:801]]
+towns = list(dict.fromkeys(it["town"] for it in J["J3"]))
+pick = J["J1"][:2] + [it for it in J["J2"] if it["frame"] == "frame_000940"][:6] + [it for t_ in towns for it in [x for x in J["J3"] if x["town"] == t_][800:801]]
 for it in pick:
     if Path(it["out"]).exists():
         a = first_frame(it["src"]); b = cv2.imread(it["out"])
