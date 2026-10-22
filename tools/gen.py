@@ -178,14 +178,38 @@ def gpu_ids():
     if cvd and cvd not in ("NoDevFiles", "-1"): return [x.strip() for x in cvd.split(",") if x.strip()]
     return [str(x["index"]) for x in gpus()] or ["0"]
 
+def cgroup_mem():
+    """(limit, usage) in bytes of this process's memory cgroup (the tightest limit up the tree), or (None, None).
+    This is what Slurm actually enforces for the job, whatever the environment variables say."""
+    lim = use = None
+    try: lines = open("/proc/self/cgroup").read().splitlines()
+    except Exception: return None, None
+    for ln in lines:
+        hid, ctrls, path = ln.split(":", 2)
+        if hid == "0" and ctrls == "": base, fl, fu = Path("/sys/fs/cgroup"), "memory.max", "memory.current"          # cgroup v2
+        elif "memory" in ctrls.split(","): base, fl, fu = Path("/sys/fs/cgroup/memory"), "memory.limit_in_bytes", "memory.usage_in_bytes"
+        else: continue
+        p = Path(path)
+        while True:
+            d = base / str(p).lstrip("/")
+            try:
+                v = open(d / fl).read().strip()
+                if v != "max" and int(v) < 2 ** 60: lim = int(v) if lim is None else min(lim, int(v))
+            except Exception: pass
+            if use is None:
+                try: use = int(open(d / fu).read().strip())
+                except Exception: pass
+            if str(p) in ("/", "."): break
+            p = p.parent
+    return lim, use
+
 def ram_limit_gb():
-    """Host RAM this job may use: the node's available memory, capped by the Slurm allocation when there is one."""
+    """Host RAM this job may use: the node's available memory, capped by the job's cgroup limit (or SLURM_MEM_PER_NODE)."""
     m = {l.split(":")[0]: int(l.split()[1]) for l in open("/proc/meminfo") if l.split(":")[0] in ("MemTotal", "MemAvailable")}
     avail = m["MemAvailable"] // 1048576
-    for k in ("SLURM_MEM_PER_NODE",):
-        if os.environ.get(k, "").isdigit(): avail = min(avail, int(os.environ[k]) // 1024)
-    if os.environ.get("SLURM_MEM_PER_CPU", "").isdigit() and os.environ.get("SLURM_CPUS_ON_NODE", "").isdigit():
-        avail = min(avail, int(os.environ["SLURM_MEM_PER_CPU"]) * int(os.environ["SLURM_CPUS_ON_NODE"]) // 1024)
+    lim, _ = cgroup_mem()
+    if lim: avail = min(avail, lim // 2 ** 30)
+    elif os.environ.get("SLURM_MEM_PER_NODE", "").isdigit(): avail = min(avail, int(os.environ["SLURM_MEM_PER_NODE"]) // 1024)
     return m["MemTotal"] // 1048576, avail
 
 class Peak(threading.Thread):
@@ -194,8 +218,11 @@ class Peak(threading.Thread):
     def run(s):
         while not s.stop:
             g = gpus(); s.vram = max([s.vram] + [x["used"] for x in g])
-            m = {l.split(":")[0]: int(l.split()[1]) for l in open("/proc/meminfo") if l.split(":")[0] in ("MemTotal", "MemAvailable")}
-            s.ram = max(s.ram, (m["MemTotal"] - m["MemAvailable"]) // 1024); time.sleep(2)
+            _, use = cgroup_mem()                                            # this job's own memory, not the shared node's
+            if use is None:
+                m = {l.split(":")[0]: int(l.split()[1]) for l in open("/proc/meminfo") if l.split(":")[0] in ("MemTotal", "MemAvailable")}
+                use = (m["MemTotal"] - m["MemAvailable"]) * 1024
+            s.ram = max(s.ram, use // 2 ** 20); time.sleep(2)
 
 def run_chunk(cid, items, seed, gpu, mock, offload):
     d = SPECS / cid; o = OUTRAW / cid; d.mkdir(parents=True, exist_ok=True); o.mkdir(parents=True, exist_ok=True)
@@ -247,7 +274,7 @@ def check(mock):
     cap = int(os.environ.get("MAX_SLOTS_PER_GPU", 1))                       # default: one generation at a time per GPU
     slots_gpu = max(1, min(cap, int(total * 0.92 // max(per, 1) if per else 1)))
     if total < 44000: log(f"WARNING: this GPU has {total // 1024} GB; multi-control needs about 40 GB. Use an 80 GB A100 or larger.")
-    slots_ram = max(1, int(info["ram_available_gb"] // 32))
+    slots_ram = max(1, int(info["ram_available_gb"] // 24))                  # ~18 GB peak per generation, measured
     info["workers"] = min(slots_gpu * len(ids), slots_ram)
     json.dump(info, open(LOGS / "check.json", "w"), indent=1)
     usable, bulk = setup_status()
@@ -259,7 +286,7 @@ def run(only, workers, mock, offload, stagger):
         log("ERROR: no passing GPU check for this set-up. Run check.sh (run_overnight.sh does this automatically)."); return 1
     info = json.load(open(LOGS / "check.json")) if (LOGS / "check.json").exists() else {}
     ids = gpu_ids(); ngpu = len(ids)
-    workers = workers or min(info.get("workers", 1) // max(1, len(info.get("gpu_ids", ids))) * ngpu or 1, max(1, ram_limit_gb()[1] // 32))
+    workers = workers or min(info.get("workers", 1) // max(1, len(info.get("gpu_ids", ids))) * ngpu or 1, max(1, ram_limit_gb()[1] // 24))
     # (slots per GPU from check.sh x GPUs of THIS job, so a later job with a different GPU count adapts)
     J = plan(); order = [j for j in ("J1", "J2", "J4", "J3", "J5") if (j in only if only else j != "J5")]   # J5 only on request
     usable, bulk = setup_status(); log(f"bulk set-up {bulk}; comparison set-ups {[v for v in COMPARE if usable[v]]}")

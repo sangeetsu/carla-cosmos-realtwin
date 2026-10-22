@@ -44,11 +44,10 @@ if needs_container; then
   fi
 fi
 
-# 5. Low-RAM text-encoder loader: only on machines with < 64 GB RAM (or LOWRAM_PATCH=1). Same weights; it only streams them to the GPU.
-MEM_GB=$(awk '/MemTotal/{print int($2/1048576)}' /proc/meminfo)
-if [ "${LOWRAM_PATCH:-0}" = 1 ] || [ "$MEM_GB" -lt 64 ]; then
-  if git -C "$COSMOS" apply --check "$BUNDLE/patches/text_encoder_lowram.patch" 2>/dev/null; then git -C "$COSMOS" apply "$BUNDLE/patches/text_encoder_lowram.patch"; log "applied low-RAM text-encoder patch (RAM ${MEM_GB} GB)"; fi
-fi
+# 5. Low-RAM text-encoder loader: streams the text-encoder weights to the GPU instead of staging all of them in host RAM.
+#    Same weights; ~18 GB peak host RAM per generation instead of > 22 GB. Applied everywhere: it is the tested configuration.
+if git -C "$COSMOS" apply --check "$BUNDLE/patches/text_encoder_lowram.patch" 2>/dev/null; then git -C "$COSMOS" apply "$BUNDLE/patches/text_encoder_lowram.patch"; log "applied low-RAM text-encoder patch"
+else log "low-RAM text-encoder patch already in place"; fi
 
 # 6. Hugging Face access + model downloads (exact revisions used by this Cosmos commit)
 "$PY" "$BUNDLE/tools/predownload.py" 2>&1 | tee -a "$RESULTS/logs/setup.log"

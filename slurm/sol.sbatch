@@ -15,4 +15,5 @@
 #SBATCH --output=realtwin_%j.out
 cd "$SLURM_SUBMIT_DIR"
 echo "job $SLURM_JOB_ID on $(hostname) at $(date)"; nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
+scontrol show job "$SLURM_JOB_ID" 2>/dev/null | grep -oE "(AllocTRES|MinMemoryNode|MinMemoryCPU)=[^ ]*"   # what Slurm actually granted
 bash run_overnight.sh
