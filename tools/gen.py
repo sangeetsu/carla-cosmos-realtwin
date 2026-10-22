@@ -65,7 +65,7 @@ def setup_status():
     ok = {k: info.get(k, {}).get("ok", True) for k in ("D", "M1", "NV4", "G35")}
     usable = {"D": ok["D"], "M1": ok["M1"], "NV4": ok["NV4"], "V25": ok["NV4"], "G25": ok["G35"], "G35": ok["G35"]}
     bulk = os.environ.get("BULK_SETUP", "M1")                            # chosen on the workstation, 2026-10-21: best label survival
-    if not usable.get(bulk, False): bulk = "D"
+    if not usable.get(bulk, False): bulk = "D" if usable["D"] else None
     return usable, bulk
 
 def cell(setup, town, frame, root="realtwin", tag=""):
@@ -91,18 +91,28 @@ def plan():
         J["J4"].append(item("J4", "video_distilled", mp4.stem.split("_")[0], mp4.stem, mp4, RES / "J4_video" / "distilled" / f"{mp4.stem}.mp4",
                             dict(EDGE, num_steps=4), "video", PROMPT_VIDEO, ("--model", "edge/distilled")))
     J["J3"] = []                                                             # bulk real twin with the chosen set-up, all frames, Town03/Town05 first
-    for t in BULK_TOWNS:
+    for t in (BULK_TOWNS if bulk else []):
         if bulk == "D" and t in ("Town03", "Town05"): continue              # already made by the local pilot
         for p in sorted((INP / "D" / t).glob("*.mp4")):
             J["J3"].append(item("J3", bulk, t, p.stem, p, cell(bulk, t, p.stem), SETUPS[bulk][1](t, p.stem)))
     J["J5"] = []                                                             # filler: held-out records again with generation seed 11
-    for t in BULK_TOWNS:
+    for t in (BULK_TOWNS if bulk else []):
         for p in sorted((INP / "D" / t).glob("*.mp4")):
             if int(p.stem.split("_")[1]) >= 800:
                 J["J5"].append(item("J5", bulk + "_seed11", t, p.stem, p, cell(bulk, t, p.stem, "realtwin_seed11", "_s11"), SETUPS[bulk][1](t, p.stem), seed0=11))
     return J
 
 CHUNK = {"J1": 30, "J4": 2, "J2": 50, "J3": 150, "J5": 150}
+CHECK_VERSION = 3                                                            # bump when the check's meaning changes
+
+def in_container():
+    return bool(os.environ.get("APPTAINER_CONTAINER") or os.environ.get("SINGULARITY_CONTAINER"))
+
+def check_ok():
+    """True only for a PASSED check made by this check version, on the same side of the container boundary."""
+    try: info = json.load(open(LOGS / "check.json"))
+    except Exception: return False
+    return bool(info.get("passed")) and info.get("version") == CHECK_VERSION and info.get("in_container") == in_container()
 
 def spec(it, seed, name):
     s = {"name": name, "prompt": it["prompt"], "video_path": it["src"], "seed": it.get("seed0", 1) + seed - 1,   # retries: seed0, seed0+1, seed0+2
@@ -205,6 +215,12 @@ def run_chunk(cid, items, seed, gpu, mock, offload):
     dt = time.time() - t0; n = harvest(d)
     return rc, dt, n
 
+def _tail(path, n=15):
+    try:
+        lines = [l.rstrip() for l in open(path, errors="replace") if "warn" not in l.lower()]
+        for l in lines[-n:]: log("    | " + l[:240])
+    except Exception: pass
+
 def check(mock):
     LOGS.mkdir(parents=True, exist_ok=True); g = gpus()
     tot, avail = ram_limit_gb(); du = shutil.disk_usage(WORK); ids = gpu_ids()
@@ -222,7 +238,10 @@ def check(mock):
         info[k] = dict(ok=bool(n), rc=rc, seconds=round(dt, 1), peak_vram_mib=p.vram, peak_ram_mib=p.ram)
         log(f"check {k}: {'OK' if n else 'FAILED'} in {dt:.0f} s (incl. model load); peak GPU memory {p.vram} MiB, peak used RAM {p.ram} MiB")
         if not n: log(f"  see {LOGS}/chunk_check_{k}.log")
-    if not info["D"]["ok"]: json.dump(info, open(LOGS / "check.json", "w"), indent=1); log("CHECK FAILED (the main job cannot run)"); sys.exit(1)
+    info.update(version=CHECK_VERSION, in_container=in_container(), passed=bool(info["D"]["ok"]))
+    if not info["D"]["ok"]:
+        json.dump(info, open(LOGS / "check.json", "w"), indent=1); log(f"CHECK FAILED (the main job cannot run). Details: {LOGS}/chunk_check_D.log")
+        _tail(LOGS / "chunk_check_D.log"); sys.exit(1)
     per = max(info[k]["peak_vram_mib"] for k in ("D", "M1", "NV4", "G35") if info[k]["ok"])
     total = min(x["total"] for x in g) if g else 81920
     cap = int(os.environ.get("MAX_SLOTS_PER_GPU", 1))                       # default: one generation at a time per GPU
@@ -236,6 +255,8 @@ def check(mock):
         f"Set-ups usable: {[k for k, v in usable.items() if v]}; bulk set-up: {bulk}")
 
 def run(only, workers, mock, offload, stagger):
+    if not mock and not check_ok():
+        log("ERROR: no passing GPU check for this set-up. Run check.sh (run_overnight.sh does this automatically)."); return 1
     info = json.load(open(LOGS / "check.json")) if (LOGS / "check.json").exists() else {}
     ids = gpu_ids(); ngpu = len(ids)
     workers = workers or min(info.get("workers", 1) // max(1, len(info.get("gpu_ids", ids))) * ngpu or 1, max(1, ram_limit_gb()[1] // 32))
@@ -260,9 +281,11 @@ def run(only, workers, mock, offload, stagger):
                     Q.put((f"{runid}_{j}_{v}_r{r}_s{seed}_{i:05d}", its[i:i + CHUNK[j]], seed)); total += len(its[i:i + CHUNK[j]])
         if total == 0: break
         log(f"round {r + 1} (seed {seed}): {total} samples in {Q.qsize()} chunks")
+        fails = {"n": 0, "abort": False}
         def worker(slot):
             time.sleep(slot * stagger if r == 0 else 0)                      # stagger the first model loads (host-RAM peaks)
             while True:
+                if fails["abort"]: return
                 try: cid, its, sd = Q.get_nowait()
                 except queue.Empty: return
                 gpu = ids[slot % ngpu]; t0 = time.strftime("%F %T")
@@ -271,9 +294,15 @@ def run(only, workers, mock, offload, stagger):
                 with lock:
                     with open(tcsv, "a", newline="") as f: csv.writer(f).writerow([cid, its[0]["job"], its[0]["variant"], sd, len(its), n, round(dt, 1), slot, gpu, rc, t0])
                 log(f"{cid}: {n}/{len(its)} outputs in {dt:.0f} s (slot {slot}, GPU {gpu}, rc {rc})")
+                with lock:
+                    fails["n"] = fails["n"] + 1 if (rc != 0 and n == 0) else 0
+                    if fails["n"] >= 3 and not fails["abort"]:
+                        fails["abort"] = True
+                        log(f"STOPPING: 3 batches in a row failed without any output. Last error ({LOGS}/chunk_{cid}.log):"); _tail(LOGS / f"chunk_{cid}.log")
         T = [threading.Thread(target=worker, args=(s,)) for s in range(workers)]
         for t in T: t.start()
         for t in T: t.join()
+        if fails["abort"]: return 2
     left = {j: sum(not Path(it["out"]).exists() for it in J[j]) for j in order}
     log(f"RUN FINISHED. Missing outputs per job: {left}")
     return 0 if not any(left.values()) else 3
@@ -281,8 +310,10 @@ def run(only, workers, mock, offload, stagger):
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(); ap.add_argument("--check", action="store_true"); ap.add_argument("--run", action="store_true")
     ap.add_argument("--only", default=None, help="comma list of jobs, e.g. J1,J3"); ap.add_argument("--workers", type=int, default=None)
+    ap.add_argument("--check-ok", action="store_true", help="exit 0 if a valid passing check exists");
     ap.add_argument("--mock", action="store_true"); ap.add_argument("--no-offload", action="store_true", help="keep guardrail models on the GPU (faster, more memory)")
     ap.add_argument("--stagger", type=int, default=int(os.environ.get("STAGGER", 150)))
     a = ap.parse_args(); LOGS.mkdir(parents=True, exist_ok=True); WORK.mkdir(parents=True, exist_ok=True); SCR.mkdir(parents=True, exist_ok=True)
+    if a.check_ok: sys.exit(0 if check_ok() else 1)
     if a.check: check(a.mock)
     if a.run: sys.exit(run(a.only.split(",") if a.only else None, a.workers, a.mock, not a.no_offload, a.stagger))

@@ -9,10 +9,11 @@ mkdir -p "$RESULTS/logs"
 needs_container && run_in_container "$0" "$@"
 # GPU nodes without internet: use the caches filled by setup.sh
 if ! has_internet; then export HF_HUB_OFFLINE=1 UV_OFFLINE=1; echo "[info] no internet on this node: offline mode (models from the setup.sh cache)"; fi
-[ -f "$RESULTS/logs/check.json" ] || bash "$BUNDLE/check.sh" $([ $MOCK = 1 ] && echo --mock) || { echo "check.sh failed - see $RESULTS/logs/gen.log"; exit 1; }
+"$PY" "$BUNDLE/tools/gen.py" --check-ok || bash "$BUNDLE/check.sh" $([ $MOCK = 1 ] && echo --mock) || { echo "check.sh failed - see $RESULTS/logs/gen.log"; exit 1; }
 "$PY" "$BUNDLE/tools/gen.py" --run ${JOBS:+--only "$JOBS"} ${WORKERS:+--workers "$WORKERS"} "$@"; RC=$?
 "$PY" "$BUNDLE/tools/summarize.py" > "$RESULTS/logs/summary.log" 2>&1 || true
 [ $MOCK = 1 ] && { echo "mock run finished (status $RC): see $RESULTS"; exit 0; }
 if [ $RC = 0 ] && [ ! -f "$RESULTS/.packed" ]; then bash "$BUNDLE/pack_results.sh" && touch "$RESULTS/.packed"   # everything done: pack once
+elif [ $RC = 2 ]; then echo "STOPPED: generation is failing; see the last lines of $RESULTS/logs/gen.log"
 elif [ $RC = 3 ]; then echo "Not finished yet: run this again (or let the next chained job run) to continue. 'bash pack_results.sh' packs what exists now."; fi
 exit $RC

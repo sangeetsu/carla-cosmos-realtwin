@@ -6,6 +6,7 @@ import argparse, json, os, time
 import numpy as np, cv2
 ap = argparse.ArgumentParser(); ap.add_argument("-i", nargs="+"); ap.add_argument("-o"); ap.add_argument("--offload-guardrail-models", action="store_true")
 ap.add_argument("--model", default=None); a = ap.parse_args()
+if os.environ.get("MOCK_FAIL"): raise SystemExit("mock: simulated start-up failure")
 for p in a.i:
     s = json.load(open(p)); name = s["name"]; src = s["video_path"]
     if s.get("guided_generation_mask"):                                    # same checks Cosmos makes on the mask file
