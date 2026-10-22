@@ -23,7 +23,7 @@ sys.path.insert(0, os.environ["COSMOS"])
 import cosmos_transfer2.config as C
 for k, v in C.MODEL_CHECKPOINTS.items():
     name = k.name if hasattr(k, "name") else str(k)
-    if k.variant.value in ("edge", "depth", "seg") and (not getattr(k, "distilled", False) or k.variant.value == "edge"):
+    if k.variant.value in ("edge", "depth", "seg", "vis") and (not getattr(k, "distilled", False) or k.variant.value == "edge"):
         log(f"checkpoint {name}"); v.download()
 
 # Text encoder, tokenizer and guardrail models (revisions as logged by the tested runs)

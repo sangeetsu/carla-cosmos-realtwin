@@ -65,7 +65,7 @@ To pack whatever is finished at any time, run `bash pack_results.sh`. Send the `
 | Job | What | Samples | Rough time |
 |---|---|---|---|
 | J1 | Reproducibility: 30 frames a reference GPU already made, from the identical input file and from a lossless PNG | 60 | 10 min |
-| J2 | Three label-preserving set-ups on 262 frames: guided generation (labeled boxes anchored for 25 or 15 of 35 steps), and edge + depth + segmentation | 786 | 2–4 h |
+| J2 | Four label-preserving set-ups on 262 frames: edge + depth + segmentation; NVIDIA's four-control car recipe; edge + light blur; boxes pasted back (background-only restyle) | 1,048 | 3–5 h |
 | J4 | Video mode on two 35-frame drives, standard model and the distilled 4-step model | 4 clips | 20–40 min |
 | J3 | The main job: every frame of eight towns (8,350) with the bulk set-up, Town03 and Town05 first | 8,350 | rest of the night |
 | J5 | Filler if time remains: the last 250 frames of each town again with another seed | 1,950 | whatever is left |
@@ -73,7 +73,8 @@ To pack whatever is finished at any time, run `bash pack_results.sh`. Send the `
 The main job will probably not finish in one night. That is expected: rerun `run_overnight.sh` on another night and it continues.
 Times are estimates; `results/logs/timing.csv` records the real ones.
 All settings are fixed in `tools/gen.py`: 720p, 35 steps, guidance 3, fixed seeds, fixed prompt.
-The bulk set-up is guided generation with 25 anchored steps (`BULK_SETUP=G25`); `check.sh` tests it and falls back to edge-only (`D`) if it fails.
+The bulk set-up is edge + depth + segmentation (`BULK_SETUP=M1`); `check.sh` tests it and falls back to edge-only (`D`) if it fails.
+Cosmos's video guardrail occasionally rejects an ordinary street frame; the run retries such frames with a new seed automatically.
 
 ## Good to know
 

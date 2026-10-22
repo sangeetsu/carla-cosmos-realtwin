@@ -22,6 +22,9 @@ SEG_PROMPT = "car. truck. bus. person. bicycle. motorcycle. road. sidewalk. buil
 EDGE = {"edge": {"preset_edge_threshold": "medium"}}                         # set-up D (identical to the local pilot)
 M1 = {"edge": {"control_weight": 1.0, "preset_edge_threshold": "medium"}, "depth": {"control_weight": 1.0},
       "seg": {"control_weight": 1.0, "control_prompt": SEG_PROMPT}}
+NV4 = {"edge": {"control_weight": 1.0, "preset_edge_threshold": "medium"}, "depth": {"control_weight": 1.0},   # NVIDIA's car multi-control example:
+       "seg": {"control_weight": 1.0, "control_prompt": SEG_PROMPT}, "vis": {"control_weight": 1.0}}              # all four controls at 1.0
+V25 = {"edge": {"control_weight": 1.0, "preset_edge_threshold": "medium"}, "vis": {"control_weight": 0.25}}     # light blur anchors colours
 IMG = {"num_video_frames_per_chunk": 1, "max_frames": 1}
 CROP = (0, 154, 1242, 529)                                                   # letterbox -> original 1242x375 frame
 SMOKE = [("Town07", k) for k in range(820, 1021, 40)] + [("Town10HD", k) for k in range(820, 1021, 40)]
@@ -48,18 +51,20 @@ def guided(town, frame, steps):
 
 # set-up name -> (cell suffix, controls for a given town/frame). D = the local pilot's set-up (edge only).
 SETUPS = {"D": ("d50_realtwin", lambda t, f: EDGE),
-          "G25": ("d52_guided25", lambda t, f: guided(t, f, 25)),
-          "G15": ("d53_guided15", lambda t, f: guided(t, f, 15)),
-          "M1": ("d54_edge_depth_seg", lambda t, f: M1)}
-COMPARE = ["G25", "G15", "M1"]                                             # J2: label-preserving candidates
+          "G25": ("d52_guided25", lambda t, f: guided(t, f, 25)),           # tested on the workstation: no survival gain over D
+          "M1": ("d54_edge_depth_seg", lambda t, f: M1),
+          "V25": ("d55_edge_blur25", lambda t, f: V25),
+          "NV4": ("d56_four_controls", lambda t, f: NV4),
+          "G35": ("d57_guided35_pasteback", lambda t, f: guided(t, f, 35))}   # boxes anchored for all 35 steps: background-only restyle
+COMPARE = ["M1", "NV4", "V25", "G35"]                                      # J2: label-preserving candidates
 BULK_TOWNS = os.environ.get("BULK_TOWNS", "Town03 Town05 Town10HD Town07 Town01 Town02 Town04 Town06").split()
 
 def setup_status():
     """Which set-ups passed check.sh, and the bulk set-up after any fallback."""
     info = json.load(open(LOGS / "check.json")) if (LOGS / "check.json").exists() else {}
-    ok = {k: info.get(k, {}).get("ok", True) for k in ("D", "M1", "G25")}
-    usable = {"D": ok["D"], "M1": ok["M1"], "G25": ok["G25"], "G15": ok["G25"]}
-    bulk = os.environ.get("BULK_SETUP", "G25")
+    ok = {k: info.get(k, {}).get("ok", True) for k in ("D", "M1", "NV4", "G35")}
+    usable = {"D": ok["D"], "M1": ok["M1"], "NV4": ok["NV4"], "V25": ok["NV4"], "G25": ok["G35"], "G35": ok["G35"]}
+    bulk = os.environ.get("BULK_SETUP", "M1")                            # chosen on the workstation, 2026-10-21: best label survival
     if not usable.get(bulk, False): bulk = "D"
     return usable, bulk
 
@@ -193,7 +198,8 @@ def check(mock):
     src = INP / "D" / "Town10HD" / "frame_000940.mp4"
     tests = [("D", item("CHECK", "D_edge", "Town10HD", "frame_000940", src, RES / "check" / "D_edge.jpg", EDGE)),
              ("M1", item("CHECK", "M1_edge_depth_seg", "Town10HD", "frame_000940", src, RES / "check" / "M1_edge_depth_seg.jpg", M1)),
-             ("G25", item("CHECK", "G25_guided", "Town10HD", "frame_000940", src, RES / "check" / "G25_guided.jpg", guided("Town10HD", "frame_000940", 25)))]
+             ("NV4", item("CHECK", "NV4_four_controls", "Town10HD", "frame_000940", src, RES / "check" / "NV4_four_controls.jpg", NV4)),
+             ("G35", item("CHECK", "G35_guided", "Town10HD", "frame_000940", src, RES / "check" / "G35_guided.jpg", guided("Town10HD", "frame_000940", 35)))]
     for k, it in tests:
         if Path(it["out"]).exists(): Path(it["out"]).unlink()
         p = Peak(); p.start(); rc, dt, n = run_chunk(f"check_{k}", [it], 1, g[0]["index"] if g else 0, mock, True); p.stop = True; p.join()
@@ -201,7 +207,7 @@ def check(mock):
         log(f"check {k}: {'OK' if n else 'FAILED'} in {dt:.0f} s (incl. model load); peak GPU memory {p.vram} MiB, peak used RAM {p.ram} MiB")
         if not n: log(f"  see {LOGS}/chunk_check_{k}.log")
     if not info["D"]["ok"]: json.dump(info, open(LOGS / "check.json", "w"), indent=1); log("CHECK FAILED (the main job cannot run)"); sys.exit(1)
-    per = max(info[k]["peak_vram_mib"] for k in ("D", "M1", "G25") if info[k]["ok"])
+    per = max(info[k]["peak_vram_mib"] for k in ("D", "M1", "NV4", "G35") if info[k]["ok"])
     total = min(x["total"] for x in g) if g else 81920
     slots_gpu = max(1, min(3, int(total * 0.92 // max(per, 1) if per else 1)))
     slots_ram = max(1, int(info["ram_available_gb"] // 32))
