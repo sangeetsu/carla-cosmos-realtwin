@@ -6,13 +6,13 @@ mkdir -p "$WORK/bin" "$RESULTS/logs"
 log(){ echo "[setup $(date '+%F %T')] $*" | tee -a "$RESULTS/logs/setup.log"; }
 command -v git >/dev/null || { log "ERROR: git is required"; exit 1; }
 
-# 1. uv (Python package manager), installed inside $WORK
-if ! command -v uv >/dev/null; then
+# 1. uv (Python package manager), always our own pinned copy inside $WORK (it must also be visible inside the container)
+if [ ! -x "$WORK/uv/uv" ]; then
   log "installing uv $UV_VERSION into $WORK/uv"
   if command -v curl >/dev/null; then curl -LsSf "https://astral.sh/uv/$UV_VERSION/install.sh" | env UV_INSTALL_DIR="$WORK/uv" UV_NO_MODIFY_PATH=1 sh
   else wget -qO- "https://astral.sh/uv/$UV_VERSION/install.sh" | env UV_INSTALL_DIR="$WORK/uv" UV_NO_MODIFY_PATH=1 sh; fi
 fi
-log "uv: $(uv --version)"
+log "uv: $("$WORK/uv/uv" --version)"
 
 # 2. Cosmos-Transfer2.5 code at the tested commit
 if [ ! -d "$COSMOS/.git" ]; then log "cloning cosmos-transfer2.5"; git clone -q https://github.com/nvidia-cosmos/cosmos-transfer2.5.git "$COSMOS"; fi
@@ -24,9 +24,16 @@ log "cosmos-transfer2.5 at $(git -C "$COSMOS" rev-parse --short HEAD)"
 log "building the Python environment (uv sync --extra=cu128)"
 (cd "$COSMOS" && uv python install 3.10 && uv sync --extra=cu128 --python 3.10) 2>&1 | tail -5 | tee -a "$RESULTS/logs/setup.log"
 
-# 4. ffmpeg: use the system one, else the copy bundled with the imageio-ffmpeg wheel
-if ! command -v ffmpeg >/dev/null; then
-  ln -sf "$("$PY" -c 'import imageio_ffmpeg; print(imageio_ffmpeg.get_ffmpeg_exe())')" "$WORK/bin/ffmpeg"; log "ffmpeg: using imageio-ffmpeg's binary"
+# 4. ffmpeg: the static binary bundled with the imageio-ffmpeg wheel (works on the host and inside the container)
+ln -sf "$("$PY" -c 'import imageio_ffmpeg; print(imageio_ffmpeg.get_ffmpeg_exe())')" "$WORK/bin/ffmpeg"; log "ffmpeg: $("$WORK/bin/ffmpeg" -version | head -1)"
+
+# 4b. Hosts with glibc < 2.29 (e.g. ASU Sol): an Ubuntu 22.04 image for the GPU runs (see env.sh)
+if needs_container; then
+  if [ -f "$SIF" ]; then log "container image present: $SIF"
+  else
+    A=$(command -v apptainer || command -v singularity) || { log "ERROR: glibc < 2.29 here and apptainer is not on this node. Run setup.sh on a compute node (e.g. the lightwork partition), or set SIF to an existing ubuntu-22.04.sif"; exit 1; }
+    log "glibc < 2.29: pulling an Ubuntu 22.04 container image to $SIF"; "$A" pull "$SIF" docker://ubuntu:22.04
+  fi
 fi
 
 # 5. Low-RAM text-encoder loader: only on machines with < 64 GB RAM (or LOWRAM_PATCH=1). Same weights; it only streams them to the GPU.

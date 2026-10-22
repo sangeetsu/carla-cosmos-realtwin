@@ -49,6 +49,20 @@ bash setup.sh
 
 If the downloads fail there for lack of internet, run `setup.sh` on the login node instead.
 
+Sol's operating system has an older C library (glibc 2.28) than NVIDIA's Transformer Engine needs (2.29), which shows up as
+`GLIBC_2.29 not found`. `setup.sh` therefore also pulls a small Ubuntu 22.04 Apptainer image into `WORK`, and the GPU scripts
+re-run themselves inside it automatically with the GPU passed through. Apptainer exists on Sol's compute nodes, which is
+another reason to run `setup.sh` on `lightwork`. If the pull fails, Sol's own image works too: list the images with `showsimg`
+and `export SIF=/path/to/ubuntu-22.04.sif`. Do not `module load` CUDA or Python first; the environment brings its own.
+
+Already hit `GLIBC_2.29 not found`? Update the bundle and rerun setup. It keeps what is already installed and adds the image:
+
+```bash
+git pull && bash setup.sh
+```
+
+Then submit the GPU job again.
+
 **3. Submit the GPU jobs.** This queues four chained one-day jobs; each continues where the previous stopped:
 
 ```bash

@@ -32,8 +32,15 @@ log("tokenizer nvidia/Cosmos-Predict2.5-2B"); hf_hub_download("nvidia/Cosmos-Pre
 log("guardrail nvidia/Cosmos-Guardrail1"); snapshot_download("nvidia/Cosmos-Guardrail1", revision="d6d4bfa899a71454a700907664f3e88f503950cf")
 for r in ["Qwen/Qwen3Guard-Gen-0.6B", "google/siglip-so400m-patch14-384"]:
     log(f"guardrail helper {r}"); snapshot_download(r)
-# On-the-fly depth / segmentation for the multi-control job (J2); failure here only disables J2
-for r in ["depth-anything/Video-Depth-Anything-Large", "IDEA-Research/grounding-dino-base", "facebook/sam2-hiera-large"]:
+# On-the-fly depth / segmentation for the multi-control set-ups; failure here only disables them.
+# Depth: Cosmos's VideoDepthAnythingModel (default encoder "vits") looks for its weights in its own cache ($COSMOS_CACHE_DIR/depth_models).
+try:
+    from cosmos_transfer2._src.transfer2.auxiliary.depth_anything import video_depth_model as vdm
+    from cosmos_transfer2._src.transfer2.auxiliary.depth_anything.model_utils import get_model_cache_path
+    enc = "vits"; log(f"multi-control helper {vdm.HF_REPO[enc]}")
+    hf_hub_download(vdm.HF_REPO[enc], vdm.WEIGHTS_NAME[enc], cache_dir=get_model_cache_path(f"video_depth_anything_{enc}"))
+except Exception as e: log(f"WARNING: could not fetch the depth helper ({type(e).__name__}: {e}); multi-control set-ups may fail, the others are unaffected")
+for r in ["IDEA-Research/grounding-dino-base", "facebook/sam2-hiera-large"]:
     try: log(f"multi-control helper {r}"); snapshot_download(r)
     except Exception as e: log(f"WARNING: could not download {r} ({type(e).__name__}); job J2 may fail, the others are unaffected")
 log("all downloads done; cache " + os.environ.get("HF_HUB_CACHE", "?"))

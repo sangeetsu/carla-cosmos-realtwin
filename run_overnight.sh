@@ -6,8 +6,9 @@ set -uo pipefail
 source "$(dirname "$0")/env.sh"
 MOCK=0; case " $* " in *" --mock "*) MOCK=1; export RESULTS="$BUNDLE/results_mock" GEN_SCRATCH="$WORK/mock";; esac   # dry runs never touch the real results
 mkdir -p "$RESULTS/logs"
+needs_container && run_in_container "$0" "$@"
 # GPU nodes without internet: use the caches filled by setup.sh
-if ! curl -sI --max-time 8 https://huggingface.co > /dev/null 2>&1; then export HF_HUB_OFFLINE=1 UV_OFFLINE=1; echo "[info] no internet on this node: offline mode (models from the setup.sh cache)"; fi
+if ! has_internet; then export HF_HUB_OFFLINE=1 UV_OFFLINE=1; echo "[info] no internet on this node: offline mode (models from the setup.sh cache)"; fi
 [ -f "$RESULTS/logs/check.json" ] || bash "$BUNDLE/check.sh" $([ $MOCK = 1 ] && echo --mock) || { echo "check.sh failed - see $RESULTS/logs/gen.log"; exit 1; }
 "$PY" "$BUNDLE/tools/gen.py" --run ${JOBS:+--only "$JOBS"} ${WORKERS:+--workers "$WORKERS"} "$@"; RC=$?
 "$PY" "$BUNDLE/tools/summarize.py" > "$RESULTS/logs/summary.log" 2>&1 || true
