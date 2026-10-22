@@ -37,4 +37,4 @@ fi
 
 # 6. Hugging Face access + model downloads (exact revisions used by this Cosmos commit)
 "$PY" "$BUNDLE/tools/predownload.py" 2>&1 | tee -a "$RESULTS/logs/setup.log"
-log "SETUP DONE. Next, on the GPU node:  bash check.sh"
+log "SETUP DONE. Next: on Sol, bash slurm/submit_chain.sh 4 ; on a workstation, bash check.sh then bash run_overnight.sh"

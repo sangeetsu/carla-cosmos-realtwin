@@ -209,7 +209,9 @@ def check(mock):
     if not info["D"]["ok"]: json.dump(info, open(LOGS / "check.json", "w"), indent=1); log("CHECK FAILED (the main job cannot run)"); sys.exit(1)
     per = max(info[k]["peak_vram_mib"] for k in ("D", "M1", "NV4", "G35") if info[k]["ok"])
     total = min(x["total"] for x in g) if g else 81920
-    slots_gpu = max(1, min(3, int(total * 0.92 // max(per, 1) if per else 1)))
+    cap = int(os.environ.get("MAX_SLOTS_PER_GPU", 1))                       # default: one generation at a time per GPU
+    slots_gpu = max(1, min(cap, int(total * 0.92 // max(per, 1) if per else 1)))
+    if total < 44000: log(f"WARNING: this GPU has {total // 1024} GB; multi-control needs about 40 GB. Use an 80 GB A100 or larger.")
     slots_ram = max(1, int(info["ram_available_gb"] // 32))
     info["workers"] = min(slots_gpu * max(1, len(g)), slots_ram)
     json.dump(info, open(LOGS / "check.json", "w"), indent=1)
@@ -220,7 +222,7 @@ def check(mock):
 def run(only, workers, mock, offload, stagger):
     info = json.load(open(LOGS / "check.json")) if (LOGS / "check.json").exists() else {}
     workers = workers or info.get("workers", 1); g = gpus(); ngpu = max(1, len(g)); gpu_ids = [x["index"] for x in g] or [0]
-    J = plan(); order = [j for j in ("J1", "J2", "J4", "J3", "J5") if (not only or j in only)]
+    J = plan(); order = [j for j in ("J1", "J2", "J4", "J3", "J5") if (j in only if only else j != "J5")]   # J5 only on request
     usable, bulk = setup_status(); log(f"bulk set-up {bulk}; comparison set-ups {[v for v in COMPARE if usable[v]]}")
     n_h = harvest_all(); log(f"resume: harvested {n_h} finished outputs; jobs {order}; {workers} worker slots on {ngpu} GPU(s)")
     tcsv = LOGS / "timing.csv"; new = not tcsv.exists(); lock = threading.Lock()
@@ -256,12 +258,13 @@ def run(only, workers, mock, offload, stagger):
         for t in T: t.join()
     left = {j: sum(not Path(it["out"]).exists() for it in J[j]) for j in order}
     log(f"RUN FINISHED. Missing outputs per job: {left}")
+    return 0 if not any(left.values()) else 3
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(); ap.add_argument("--check", action="store_true"); ap.add_argument("--run", action="store_true")
     ap.add_argument("--only", default=None, help="comma list of jobs, e.g. J1,J3"); ap.add_argument("--workers", type=int, default=None)
     ap.add_argument("--mock", action="store_true"); ap.add_argument("--no-offload", action="store_true", help="keep guardrail models on the GPU (faster, more memory)")
     ap.add_argument("--stagger", type=int, default=int(os.environ.get("STAGGER", 150)))
-    a = ap.parse_args(); LOGS.mkdir(parents=True, exist_ok=True)
+    a = ap.parse_args(); LOGS.mkdir(parents=True, exist_ok=True); WORK.mkdir(parents=True, exist_ok=True); SCR.mkdir(parents=True, exist_ok=True)
     if a.check: check(a.mock)
-    if a.run: run(a.only.split(",") if a.only else None, a.workers, a.mock, not a.no_offload, a.stagger)
+    if a.run: sys.exit(run(a.only.split(",") if a.only else None, a.workers, a.mock, not a.no_offload, a.stagger))

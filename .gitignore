@@ -4,3 +4,4 @@ results/
 *.tar.sha256
 __pycache__/
 results_mock/
+realtwin_*.out
