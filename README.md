@@ -55,6 +55,13 @@ If the downloads fail there for lack of internet, run `setup.sh` on the login no
 bash slurm/submit_chain.sh 4
 ```
 
+To use two GPUs for 16 hours in a single job instead, pass the options through:
+
+```bash
+bash slurm/submit_chain.sh 1 -G a100:2 --cpus-per-task=16 --mem=128G --time=16:00:00
+```
+
+Run `setup.sh` before the GPU job starts; it needs no GPU and the job stops at once without it.
 The first job runs a 15-minute GPU check before anything else. Its log, `realtwin_<jobid>.out`, must show `CHECK PASSED`.
 If it shows `CHECK FAILED`, the GPU was probably too small; see "Choosing a GPU" below.
 
@@ -77,7 +84,8 @@ The heaviest set-up needs about 40 GB of GPU memory, measured on the reference m
 | A30 24 GB, A100 MIG slices | No: too little memory |
 | GH200 (`arm` partition), MI200 (`fpga` partition) | No: ARM CPU or AMD GPU; the software needs x86_64 and NVIDIA CUDA |
 
-Runs are one at a time per GPU. A job with several GPUs (`-G a100:2`) uses all of them in parallel. On an 80 GB or larger card
+Runs are one at a time per GPU. A job with several GPUs (`-G a100:2`) uses all of them in parallel, taking the GPU numbers
+Slurm assigns; allow about 64 GB of `--mem` per GPU. On an 80 GB or larger card
 you may also allow two runs per GPU with `MAX_SLOTS_PER_GPU=2`; `check.sh` still caps this by the measured memory.
 Sol's `public` partition allows up to 7 days per job and `htc` up to 4 hours; shorter jobs usually start sooner.
 `general` nodes used with the `private` QoS can be cancelled when their owners need them. Nothing is lost: resubmit and the run continues.

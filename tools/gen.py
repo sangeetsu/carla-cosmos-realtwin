@@ -161,6 +161,23 @@ def gpus():
         return [dict(index=int(a), name=b.strip(), total=int(c), used=int(d)) for a, b, c, d in (l.split(",") for l in q.strip().splitlines())]
     except Exception: return []
 
+def gpu_ids():
+    """GPUs this job may use. Under Slurm (or any scheduler) CUDA_VISIBLE_DEVICES lists the allocated devices, in the numbering CUDA
+    expects inside the job; nvidia-smi's own indices can differ there, so they are only the fallback."""
+    cvd = os.environ.get("CUDA_VISIBLE_DEVICES", "").strip()
+    if cvd and cvd not in ("NoDevFiles", "-1"): return [x.strip() for x in cvd.split(",") if x.strip()]
+    return [str(x["index"]) for x in gpus()] or ["0"]
+
+def ram_limit_gb():
+    """Host RAM this job may use: the node's available memory, capped by the Slurm allocation when there is one."""
+    m = {l.split(":")[0]: int(l.split()[1]) for l in open("/proc/meminfo") if l.split(":")[0] in ("MemTotal", "MemAvailable")}
+    avail = m["MemAvailable"] // 1048576
+    for k in ("SLURM_MEM_PER_NODE",):
+        if os.environ.get(k, "").isdigit(): avail = min(avail, int(os.environ[k]) // 1024)
+    if os.environ.get("SLURM_MEM_PER_CPU", "").isdigit() and os.environ.get("SLURM_CPUS_ON_NODE", "").isdigit():
+        avail = min(avail, int(os.environ["SLURM_MEM_PER_CPU"]) * int(os.environ["SLURM_CPUS_ON_NODE"]) // 1024)
+    return m["MemTotal"] // 1048576, avail
+
 class Peak(threading.Thread):
     """Polls GPU memory and host RAM while a test runs."""
     def __init__(s): super().__init__(daemon=True); s.vram = 0; s.ram = 0; s.stop = False
@@ -190,10 +207,9 @@ def run_chunk(cid, items, seed, gpu, mock, offload):
 
 def check(mock):
     LOGS.mkdir(parents=True, exist_ok=True); g = gpus()
-    m = {l.split(":")[0]: int(l.split()[1]) for l in open("/proc/meminfo") if l.split(":")[0] in ("MemTotal", "MemAvailable")}
-    du = shutil.disk_usage(WORK)
-    info = dict(host=os.uname().nodename, gpus=g, ram_total_gb=m["MemTotal"] // 1048576, ram_available_gb=m["MemAvailable"] // 1048576, disk_free_gb=du.free // 2**30)
-    log(f"host {info['host']}; GPUs {[(x['name'], x['total']) for x in g]}; RAM {info['ram_total_gb']} GB (available {info['ram_available_gb']}); disk free {info['disk_free_gb']} GB")
+    tot, avail = ram_limit_gb(); du = shutil.disk_usage(WORK); ids = gpu_ids()
+    info = dict(host=os.uname().nodename, gpus=g, gpu_ids=ids, ram_total_gb=tot, ram_available_gb=avail, disk_free_gb=du.free // 2**30)
+    log(f"host {info['host']}; GPUs {[(x['name'], x['total']) for x in g]}; using GPU ids {ids}; RAM usable {avail} GB of {tot}; disk free {info['disk_free_gb']} GB")
     if not g and not mock: log("ERROR: no NVIDIA GPU visible (nvidia-smi)"); sys.exit(1)
     src = INP / "D" / "Town10HD" / "frame_000940.mp4"
     tests = [("D", item("CHECK", "D_edge", "Town10HD", "frame_000940", src, RES / "check" / "D_edge.jpg", EDGE)),
@@ -202,7 +218,7 @@ def check(mock):
              ("G35", item("CHECK", "G35_guided", "Town10HD", "frame_000940", src, RES / "check" / "G35_guided.jpg", guided("Town10HD", "frame_000940", 35)))]
     for k, it in tests:
         if Path(it["out"]).exists(): Path(it["out"]).unlink()
-        p = Peak(); p.start(); rc, dt, n = run_chunk(f"check_{k}", [it], 1, g[0]["index"] if g else 0, mock, True); p.stop = True; p.join()
+        p = Peak(); p.start(); rc, dt, n = run_chunk(f"check_{k}", [it], 1, ids[0], mock, True); p.stop = True; p.join()
         info[k] = dict(ok=bool(n), rc=rc, seconds=round(dt, 1), peak_vram_mib=p.vram, peak_ram_mib=p.ram)
         log(f"check {k}: {'OK' if n else 'FAILED'} in {dt:.0f} s (incl. model load); peak GPU memory {p.vram} MiB, peak used RAM {p.ram} MiB")
         if not n: log(f"  see {LOGS}/chunk_check_{k}.log")
@@ -213,7 +229,7 @@ def check(mock):
     slots_gpu = max(1, min(cap, int(total * 0.92 // max(per, 1) if per else 1)))
     if total < 44000: log(f"WARNING: this GPU has {total // 1024} GB; multi-control needs about 40 GB. Use an 80 GB A100 or larger.")
     slots_ram = max(1, int(info["ram_available_gb"] // 32))
-    info["workers"] = min(slots_gpu * max(1, len(g)), slots_ram)
+    info["workers"] = min(slots_gpu * len(ids), slots_ram)
     json.dump(info, open(LOGS / "check.json", "w"), indent=1)
     usable, bulk = setup_status()
     log(f"CHECK PASSED. Worker slots: {info['workers']} ({slots_gpu} per GPU by memory, {slots_ram} by RAM). "
@@ -221,7 +237,9 @@ def check(mock):
 
 def run(only, workers, mock, offload, stagger):
     info = json.load(open(LOGS / "check.json")) if (LOGS / "check.json").exists() else {}
-    workers = workers or info.get("workers", 1); g = gpus(); ngpu = max(1, len(g)); gpu_ids = [x["index"] for x in g] or [0]
+    ids = gpu_ids(); ngpu = len(ids)
+    workers = workers or min(info.get("workers", 1) // max(1, len(info.get("gpu_ids", ids))) * ngpu or 1, max(1, ram_limit_gb()[1] // 32))
+    # (slots per GPU from check.sh x GPUs of THIS job, so a later job with a different GPU count adapts)
     J = plan(); order = [j for j in ("J1", "J2", "J4", "J3", "J5") if (j in only if only else j != "J5")]   # J5 only on request
     usable, bulk = setup_status(); log(f"bulk set-up {bulk}; comparison set-ups {[v for v in COMPARE if usable[v]]}")
     n_h = harvest_all(); log(f"resume: harvested {n_h} finished outputs; jobs {order}; {workers} worker slots on {ngpu} GPU(s)")
@@ -247,7 +265,7 @@ def run(only, workers, mock, offload, stagger):
             while True:
                 try: cid, its, sd = Q.get_nowait()
                 except queue.Empty: return
-                gpu = gpu_ids[slot % ngpu]; t0 = time.strftime("%F %T")
+                gpu = ids[slot % ngpu]; t0 = time.strftime("%F %T")
                 try: rc, dt, n = run_chunk(cid, its, sd, gpu, mock, offload)
                 except Exception as e: log(f"ERROR in chunk {cid}: {type(e).__name__}: {e}"); continue   # keep the slot alive
                 with lock:

@@ -1,9 +1,12 @@
 #!/bin/bash
 # ASU Sol: one GPU job that runs, or continues, the whole bundle. Submit a chain of these with:  bash slurm/submit_chain.sh 4
+# Options given on the command line override the lines below, e.g. two GPUs for 16 hours:
+#   bash slurm/submit_chain.sh 1 -G a100:2 --cpus-per-task=16 --mem=128G --time=16:00:00
 # GPU: an 80 GB A100 (multi-control needs ~40 GB). 40 GB A100s, A30s, MIG slices, GH200 (ARM) and MI200 (AMD) will not work.
 # If your lab owns H100 nodes, use:  -G h100:1  with  --partition=general --qos=grp_<labname>  (and drop the -C line).
 #SBATCH --job-name=realtwin
 #SBATCH --partition=public
+#SBATCH -N 1
 #SBATCH -G a100:1
 #SBATCH -C a100_80
 #SBATCH --cpus-per-task=8
