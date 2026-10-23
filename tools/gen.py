@@ -224,6 +224,8 @@ class Peak(threading.Thread):
                 use = (m["MemTotal"] - m["MemAvailable"]) * 1024
             s.ram = max(s.ram, use // 2 ** 20); time.sleep(2)
 
+ACTIVE_WORKERS = [1]                                                         # set by run(); used to split CPU cores
+
 def run_chunk(cid, items, seed, gpu, mock, offload):
     d = SPECS / cid; o = OUTRAW / cid; d.mkdir(parents=True, exist_ok=True); o.mkdir(parents=True, exist_ok=True)
     for old in d.glob("*.json"): old.unlink()                               # never re-run stale specs
@@ -237,6 +239,12 @@ def run_chunk(cid, items, seed, gpu, mock, offload):
     else: cmd = [PY, "examples/inference.py"]
     cmd += ["-i", *sorted(str(p) for p in d.glob("*.json") if p.name != "items.json"), "-o", str(o)] + (["--offload-guardrail-models"] if offload else []) + cli
     env = dict(os.environ, CUDA_VISIBLE_DEVICES=str(gpu))
+    # Each generation gets an equal share of the job's CPU cores. Without this every process sizes its thread pools to the
+    # whole node (e.g. 48 cores) while the job owns only a few; parallel runs then thrash (seen on Sol: 5-6x slower).
+    cpus = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else (os.cpu_count() or 1)
+    per = str(max(1, cpus // max(1, ACTIVE_WORKERS[0])))
+    for k in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS"): env.setdefault(k, per)
+    env.setdefault("TOKENIZERS_PARALLELISM", "false")
     t0 = time.time()
     with open(LOGS / f"chunk_{cid}.log", "w") as lf: rc = subprocess.run(cmd, cwd=COSMOS if not mock else B, stdout=lf, stderr=subprocess.STDOUT, env=env).returncode
     dt = time.time() - t0; n = harvest(d)
@@ -288,9 +296,12 @@ def run(only, workers, mock, offload, stagger):
     ids = gpu_ids(); ngpu = len(ids)
     workers = workers or min(info.get("workers", 1) // max(1, len(info.get("gpu_ids", ids))) * ngpu or 1, max(1, ram_limit_gb()[1] // 24))
     # (slots per GPU from check.sh x GPUs of THIS job, so a later job with a different GPU count adapts)
+    ACTIVE_WORKERS[0] = workers
     J = plan(); order = [j for j in ("J1", "J2", "J4", "J3", "J5") if (j in only if only else j != "J5")]   # J5 only on request
     usable, bulk = setup_status(); log(f"bulk set-up {bulk}; comparison set-ups {[v for v in COMPARE if usable[v]]}")
-    n_h = harvest_all(); log(f"resume: harvested {n_h} finished outputs; jobs {order}; {workers} worker slots on {ngpu} GPU(s)")
+    n_h = harvest_all(); cpus = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else (os.cpu_count() or 1)
+    log(f"resume: harvested {n_h} finished outputs; jobs {order}; {workers} worker slots on {ngpu} GPU(s); "
+        f"{cpus} CPU cores, {max(1, cpus // max(1, workers))} threads per generation")
     tcsv = LOGS / "timing.csv"; new = not tcsv.exists(); lock = threading.Lock()
     with open(tcsv, "a", newline="") as f:
         if new: csv.writer(f).writerow(["chunk", "job", "variant", "seed", "n_samples", "n_new_outputs", "seconds", "slot", "gpu", "rc", "start"])
